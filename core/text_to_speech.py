@@ -1,27 +1,25 @@
 import time
 from os import listdir, remove
 
-import soundfile as sf
 import torch
 from datasets import load_dataset
 from natsort import natsorted
 from pydub import AudioSegment
+from scipy.io.wavfile import write as write_wav
 from tqdm import tqdm
-from transformers import pipeline
+from transformers import AutoProcessor, BarkModel
 
-MODEL_NAME = "microsoft/speecht5_tts"
-SPEAKER = 7306
+MODEL_NAME = "suno/bark"
+SPEAKER = "v2/en_speaker_9"
 AUDIO_HOME = "./audio"
 
 
 class VoiceSynthesis:
     def __init__(self, filename: str = '') -> None:
-        self.synthesiser = pipeline(
-            "text-to-speech", "microsoft/speecht5_tts", device=0 if torch.cuda.is_available() else -1)
-        self.embeddings_dataset = load_dataset(
-            "Matthijs/cmu-arctic-xvectors", split="validation")
-        self.speaker_embeddings = torch.tensor(
-            self.embeddings_dataset[SPEAKER]["xvector"]).unsqueeze(0)
+        self.device = 0 if torch.cuda.is_available() else -1
+        self.model = BarkModel.from_pretrained(MODEL_NAME).to(self.device)
+        self.processor = AutoProcessor.from_pretrained(
+            MODEL_NAME)
         self.filename = filename
 
     def generate_speech(self, text: str) -> str:
@@ -29,11 +27,12 @@ class VoiceSynthesis:
         text_split = text.split(" ")
         text_sections = self._chunk_list(
             text.split(" "), len(text_split) // 16)
-        for i, text_section in enumerate(text_sections):
-            speech = self.synthesiser(
-                text_section, forward_params={"speaker_embeddings": self.speaker_embeddings})
-            self._save_speech(speech["audio"], speech["sampling_rate"],
-                              tmp_number=i)
+        for i, text_section in tqdm(enumerate(text_sections), desc="Generating speech segments..."):
+            inputs = self.processor(text_section, voice_preset=SPEAKER)
+            speech = self.model.generate(**inputs.to(self.device))
+            audio = speech[0].cpu().numpy()
+            sampling_rate = self.model.generation_config.sample_rate
+            self._save_speech(audio, sampling_rate, tmp_number=i)
         return self._merge_speeches()
 
     def _chunk_list(self, list, n) -> GeneratorExit:
@@ -46,8 +45,8 @@ class VoiceSynthesis:
             remove(f"{AUDIO_HOME}/tmp/{file}")
 
     def _save_speech(self, audio, sampling_rate, tmp_number: int = -1) -> None:
-        sf.write(f"{AUDIO_HOME}/tmp/{self.filename}{'_' + str(tmp_number) if tmp_number > -1 else ''}.wav",
-                 audio, samplerate=sampling_rate)
+        write_wav(f"{AUDIO_HOME}/tmp/{self.filename}{'_' + str(tmp_number) if tmp_number > -1 else ''}.wav",
+                  data=audio.T, rate=sampling_rate)
 
     def _merge_speeches(self) -> str:
         files = natsorted(listdir(f"{AUDIO_HOME}/tmp"))
